@@ -5,34 +5,41 @@ from datetime import datetime
 
 def extract_statement_month(pdf_path):
     """
-    Try to extract the statement month from the first two pages of the PDF.
-    Returns e.g. 'August 2025'
+    Extract statement month from first two pages using flexible patterns.
+    Works with SBI style date ranges like '01/07/2025 To 31/07/2025', 'As on: 31/07/2025', or literal 'August 2025'.
+    Returns, e.g., 'July 2025' or 'August 2025'
     """
     with pdfplumber.open(pdf_path) as pdf:
-        for page in pdf.pages[:2]:  # Usually appears early
-            text = page.extract_text()
-            if not text:
-                continue
-            # Check for date range pattern: 01/08/2025 - 31/08/2025
-            match = re.search(r'(\d{2}/\d{2}/\d{4})\s*-\s*(\d{2}/\d{2}/\d{4})', text)
-            if match:
-                dt = datetime.strptime(match.group(1), "%d/%m/%Y")
-                return dt.strftime("%B %Y")  # e.g. "August 2025"
-            # Check for month-year pattern: August 2025
-            match2 = re.search(
-                r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})',
-                text,
-                re.IGNORECASE
-            )
-            if match2:
-                dt = datetime.strptime(f"01 {match2.group(1)} {match2.group(2)}", "%d %B %Y")
+        for page in pdf.pages[:2]:
+            text = page.extract_text() or ""
+
+            # Pattern 1: date range with - or to (case insensitive)
+            m = re.search(r'(\d{2}/\d{2}/\d{4})\s*(?:-|to|To|TO)\s*(\d{2}/\d{2}/\d{4})', text, re.IGNORECASE)
+            if m:
+                dt = datetime.strptime(m.group(1), "%d/%m/%Y")
                 return dt.strftime("%B %Y")
+
+            # Pattern 2: 'As on: 31/07/2025'
+            m2 = re.search(r'As on:? (\d{2}/\d{2}/\d{4})', text, re.IGNORECASE)
+            if m2:
+                dt = datetime.strptime(m2.group(1), "%d/%m/%Y")
+                return dt.strftime("%B %Y")
+
+            # Pattern 3: Literal month-year like 'August 2025'
+            m3 = re.search(
+                r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})',
+                text, re.IGNORECASE)
+            if m3:
+                dt = datetime.strptime(f"01 {m3.group(1)} {m3.group(2)}", "%d %B %Y")
+                return dt.strftime("%B %Y")
+
     return None
 
 
 def parse_date(date_str):
     """
-    Parse varied date formats like dd/mm/yyyy or dd MMM yy into ISO format yyyy-mm-dd
+    Parse date strings in formats dd/mm/yyyy or dd MMM yy.
+    Return ISO 8601 date string or original if parse fails.
     """
     date_str = date_str.strip()
     for fmt in ("%d/%m/%Y", "%d %b %y"):
@@ -41,23 +48,23 @@ def parse_date(date_str):
             return dt.strftime("%Y-%m-%d")
         except Exception:
             continue
-    return date_str  # fallback to original string if parsing fails
+    return date_str
 
 
 def parse_amount_with_dc(amount_str):
     """
-    Parses amount string for debit/credit suffix ('D' or 'C').
-    Returns (debit_amount, credit_amount) as floats or empty strings.
+    Parse an amount that may end with D or C (debit/credit).
+    Return (debit_amount, credit_amount) as floats or empty strings.
     """
     if not amount_str or not str(amount_str).strip():
         return "", ""
 
     amt_raw = str(amount_str).replace(',', '').strip()
 
-    # Regex for number and optional trailing D or C
     m = re.match(r"([\d\.]+)\s*([DdCc])?", amt_raw)
     if not m:
         return "", ""
+
     num = m.group(1)
     dc = m.group(2)
 
@@ -68,19 +75,32 @@ def parse_amount_with_dc(amount_str):
 
     if dc:
         if dc.upper() == "C":
-            return "", val  # Credit
+            return "", val
         elif dc.upper() == "D":
-            return val, ""  # Debit
-    # Default to debit if no suffix
-    return val, ""
+            return val, ""
+    return val, ""  # Default to debit if no suffix
+
+
+def split_single_row_to_rows(text):
+    """
+    Split a large text blob containing multiple transactions into individual rows,
+    by splitting at each date pattern match (dd/mm/yyyy or dd MMM yy).
+    Returns list of string rows.
+    """
+    # Use positive lookahead to split but keep delimiters
+    pattern = r'(?=\d{2}/\d{2}/\d{4})|(?=\d{1,2} [A-Za-z]{3} \d{2})'
+    parts = re.split(pattern, text)
+    # Remove empty strings and trim spaces
+    return [p.strip() for p in parts if p.strip()]
 
 
 def extract_transactions(pdf_path):
     """
-    Extract transactions from the PDF.
-    Returns a list of dicts with keys Date, Vendor, Description,
-    Debit Amount, Credit Amount, Balance.
-    Works with SBI and formats with 'D'/'C' suffixes.
+    Extract transactions handling both:
+    - Normal pdfplumber tables where each row is a transaction row
+    - Cases where pdfplumber returns one big row (joined text), splitting it with regex
+    Returns list of dicts with keys: Date, Vendor, Description,
+    Debit Amount, Credit Amount, Balance
     """
     transactions = []
 
@@ -88,45 +108,85 @@ def extract_transactions(pdf_path):
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
-                for row in table:
-                    if not row or len(row) < 2:
-                        continue
+                # Check if the table looks like a single large row joined as one string
+                if len(table) == 1 and len(table[0]) == 1 and len(table[0][0]) > 100:
+                    # Big joined text, split it into transaction rows
+                    text_blob = table[0][0]
+                    rows_text = split_single_row_to_rows(text_blob)
 
-                    first_col = str(row[0]).strip()
-                    # Detect date in first column via two formats (SBI compatible)
-                    if not (re.match(r"\d{2}/\d{2}/\d{4}", first_col) or re.match(r"\d{1,2} [A-Za-z]{3} \d{2}", first_col)):
-                        continue
+                    for row_text in rows_text:
+                        # Split the row text roughly by multiple spaces or tab
+                        cols = re.split(r'\s{2,}|\t', row_text)
+                        if len(cols) < 3:
+                            # Skip if definitely not enough columns
+                            continue
 
-                    txn = {}
-                    txn["Date"] = parse_date(first_col)
-                    txn["Vendor"] = str(row[1]).strip() if len(row) > 1 else ""
-                    txn["Description"] = str(row[2]).strip() if len(row) > 2 else ""
+                        # Identify the date column (first col)
+                        date_str = cols[0].strip()
+                        if not (re.match(r"\d{2}/\d{2}/\d{4}", date_str) or re.match(r"\d{1,2} [A-Za-z]{3} \d{2}", date_str)):
+                            continue
 
-                    debit_amt = ""
-                    credit_amt = ""
+                        txn = {}
+                        txn["Date"] = parse_date(date_str)
+                        txn["Vendor"] = cols[1].strip() if len(cols) > 1 else ""
+                        txn["Description"] = cols[2].strip() if len(cols) > 2 else ""
 
-                    # Amount columns may vary - try from 4th column onward
-                    amount_cols = row[3:] if len(row) > 3 else []
+                        # Amount columns detection heuristic:
+                        debit_amt = credit_amt = ""
 
-                    for amt_col in amount_cols:
-                        d, c = parse_amount_with_dc(amt_col)
-                        if d != "":
+                        # Try to find debit/credit amount in rest columns
+                        for amt_col in cols[3:]:
+                            d, c = parse_amount_with_dc(amt_col)
+                            if d != "":
+                                debit_amt = d
+                            if c != "":
+                                credit_amt = c
+
+                        txn["Debit Amount"] = debit_amt
+                        txn["Credit Amount"] = credit_amt
+                        txn["Balance"] = ""  # Balance data might be missing here
+
+                        transactions.append(txn)
+
+                else:
+                    # This is a normal table with rows
+                    for row in table:
+                        if not row or len(row) < 2:
+                            continue
+
+                        first_col = str(row[0]).strip()
+                        if not (re.match(r"\d{2}/\d{2}/\d{4}", first_col)
+                                or re.match(r"\d{1,2} [A-Za-z]{3} \d{2}", first_col)):
+                            continue
+
+                        txn = {}
+                        txn["Date"] = parse_date(first_col)
+                        txn["Vendor"] = str(row[1]).strip() if len(row) > 1 else ""
+                        txn["Description"] = str(row[2]).strip() if len(row) > 2 else ""
+
+                        debit_amt = ""
+                        credit_amt = ""
+
+                        amount_cols = row[3:] if len(row) > 3 else []
+
+                        for amt_col in amount_cols:
+                            d, c = parse_amount_with_dc(amt_col)
+                            if d != "":
+                                debit_amt = d
+                            if c != "":
+                                credit_amt = c
+
+                        # Fallback if still empty
+                        if debit_amt == "" and credit_amt == "" and len(row) >= 4:
+                            d, c = parse_amount_with_dc(row[3])
                             debit_amt = d
-                        if c != "":
                             credit_amt = c
 
-                    # Fallback: check specific 4th column if still empty
-                    if debit_amt == "" and credit_amt == "" and len(row) >= 4:
-                        d, c = parse_amount_with_dc(row[3])
-                        debit_amt = d
-                        credit_amt = c
+                        txn["Debit Amount"] = debit_amt
+                        txn["Credit Amount"] = credit_amt
 
-                    txn["Debit Amount"] = debit_amt
-                    txn["Credit Amount"] = credit_amt
+                        txn["Balance"] = str(row[5]).strip() if len(row) > 5 else ""
 
-                    # Balance or other data if exists
-                    txn["Balance"] = str(row[5]).strip() if len(row) > 5 else ""
-
-                    transactions.append(txn)
+                        transactions.append(txn)
 
     return transactions

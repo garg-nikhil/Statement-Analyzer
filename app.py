@@ -17,27 +17,25 @@ def process_pdf():
     try:
         if 'file' not in request.files:
             return jsonify({"error": "No file uploaded"}), 400
-        
+
         file = request.files['file']
 
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
             file.save(tmp.name)
-            # Extract month name to decide which sheet tab to update
             month = extract_statement_month(tmp.name) or "Unknown"
             transactions = extract_transactions(tmp.name)
 
         if not transactions:
             return jsonify({"error": "No transactions found"}), 200
 
-        # Normalize columns and order
-        cols = ["Date", "Vendor", "Description", "Debit Amount", "Credit Amount", "Balance"]
+        # Normalize columns for consistency
+        columns = ["Date", "Vendor", "Description", "Debit Amount", "Credit Amount", "Balance"]
         df = pd.DataFrame(transactions)
-        for col in cols:
+        for col in columns:
             if col not in df.columns:
                 df[col] = ""
-        df = df[cols]
+        df = df[columns]
 
-        # Prepare data rows for Google Sheets API
         rows = df.values.tolist()
 
         payload = {
@@ -45,7 +43,6 @@ def process_pdf():
             "data": rows
         }
 
-        # Send POST request to Google Apps Script webhook
         resp = requests.post(GOOGLE_SHEETS_WEBHOOK, json=payload)
 
         return jsonify({
