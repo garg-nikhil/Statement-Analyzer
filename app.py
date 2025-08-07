@@ -6,7 +6,7 @@ from utils.pdf_extractor import extract_transactions, extract_statement_month
 import pandas as pd
 import requests
 
-# Edit this with your Google Apps Script webhook URL!
+# Your Google Apps Script Web App URL endpoint to update the sheets
 GOOGLE_SHEETS_WEBHOOK = "https://script.google.com/macros/s/AKfycbzIA9BeJzkrEMCz1nvj_2nzmRGS7iFRfc0HMvJAeu0NCZqB0f9xFGmtmY2ee-ufZxMP/exec"
 
 app = Flask(__name__)
@@ -22,14 +22,14 @@ def process_pdf():
 
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
             file.save(tmp.name)
-            # Extract statement month like "August 2025"
+            # Extract month name to decide which sheet tab to update
             month = extract_statement_month(tmp.name) or "Unknown"
             transactions = extract_transactions(tmp.name)
 
         if not transactions:
             return jsonify({"error": "No transactions found"}), 200
 
-        # Normalize and ensure consistent columns
+        # Normalize columns and order
         cols = ["Date", "Vendor", "Description", "Debit Amount", "Credit Amount", "Balance"]
         df = pd.DataFrame(transactions)
         for col in cols:
@@ -37,7 +37,7 @@ def process_pdf():
                 df[col] = ""
         df = df[cols]
 
-        # Convert to list of lists for Google Sheets API
+        # Prepare data rows for Google Sheets API
         rows = df.values.tolist()
 
         payload = {
@@ -45,7 +45,7 @@ def process_pdf():
             "data": rows
         }
 
-        # POST data to Google Sheets Apps Script webhook
+        # Send POST request to Google Apps Script webhook
         resp = requests.post(GOOGLE_SHEETS_WEBHOOK, json=payload)
 
         return jsonify({
