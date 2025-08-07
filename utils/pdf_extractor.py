@@ -3,6 +3,33 @@ import re
 from datetime import datetime
 import pprint
 
+def extract_statement_month(pdf_path):
+    import re
+    from datetime import datetime
+    import pdfplumber
+
+    with pdfplumber.open(pdf_path) as pdf:
+        for page in pdf.pages[:2]:
+            text = page.extract_text() or ""
+
+            m = re.search(r'(\d{2}/\d{2}/\d{4})\s*(?:-|to|To|TO)\s*(\d{2}/\d{2}/\d{4})', text, re.IGNORECASE)
+            if m:
+                dt = datetime.strptime(m.group(1), "%d/%m/%Y")
+                return dt.strftime("%B %Y")
+
+            m2 = re.search(r'As on:? (\d{2}/\d{2}/\d{4})', text, re.IGNORECASE)
+            if m2:
+                dt = datetime.strptime(m2.group(1), "%d/%m/%Y")
+                return dt.strftime("%B %Y")
+
+            m3 = re.search(
+                r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})',
+                text, re.IGNORECASE)
+            if m3:
+                dt = datetime.strptime(f"01 {m3.group(1)} {m3.group(2)}", "%d %B %Y")
+                return dt.strftime("%B %Y")
+
+    return None
 
 def parse_date(date_str):
     """
