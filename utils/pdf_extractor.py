@@ -5,27 +5,30 @@ from datetime import datetime
 
 def extract_statement_month(pdf_path):
     """
-    Extract statement month from first two pages using flexible patterns.
-    Works with SBI style date ranges like '01/07/2025 To 31/07/2025', 'As on: 31/07/2025', or literal 'August 2025'.
-    Returns, e.g., 'July 2025' or 'August 2025'
+    Extract statement month from the first two pages using flexible regex.
+    Handles formats like:
+    - '01/07/2025 To 31/07/2025'
+    - 'As on: 31/07/2025'
+    - literal 'August 2025'
+    Returns a string like 'July 2025' or None if not found.
     """
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages[:2]:
             text = page.extract_text() or ""
 
-            # Pattern 1: date range with - or to (case insensitive)
+            # Pattern 1: date range (dash or "to")
             m = re.search(r'(\d{2}/\d{2}/\d{4})\s*(?:-|to|To|TO)\s*(\d{2}/\d{2}/\d{4})', text, re.IGNORECASE)
             if m:
                 dt = datetime.strptime(m.group(1), "%d/%m/%Y")
                 return dt.strftime("%B %Y")
 
-            # Pattern 2: 'As on: 31/07/2025'
+            # Pattern 2: "As on: 31/07/2025"
             m2 = re.search(r'As on:? (\d{2}/\d{2}/\d{4})', text, re.IGNORECASE)
             if m2:
                 dt = datetime.strptime(m2.group(1), "%d/%m/%Y")
                 return dt.strftime("%B %Y")
 
-            # Pattern 3: Literal month-year like 'August 2025'
+            # Pattern 3: literal month-year e.g. August 2025
             m3 = re.search(
                 r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})',
                 text, re.IGNORECASE)
@@ -38,8 +41,8 @@ def extract_statement_month(pdf_path):
 
 def parse_date(date_str):
     """
-    Parse date strings in formats dd/mm/yyyy or dd MMM yy.
-    Return ISO 8601 date string or original if parse fails.
+    Parse a date string in either "dd/mm/yyyy" or "dd MMM yy" formats.
+    Returns ISO date string "YYYY-MM-DD" or original string if parsing fails.
     """
     date_str = date_str.strip()
     for fmt in ("%d/%m/%Y", "%d %b %y"):
@@ -53,8 +56,8 @@ def parse_date(date_str):
 
 def parse_amount_with_dc(amount_str):
     """
-    Parse an amount that may end with D or C (debit/credit).
-    Return (debit_amount, credit_amount) as floats or empty strings.
+    Parse amount string which may have a trailing 'D' (debit) or 'C' (credit).
+    Returns a tuple (debit_amount, credit_amount) as floats or empty strings.
     """
     if not amount_str or not str(amount_str).strip():
         return "", ""
@@ -78,29 +81,26 @@ def parse_amount_with_dc(amount_str):
             return "", val
         elif dc.upper() == "D":
             return val, ""
-    return val, ""  # Default to debit if no suffix
+    return val, ""  # default to debit if no suffix
 
 
 def split_single_row_to_rows(text):
     """
-    Split a large text blob containing multiple transactions into individual rows,
-    by splitting at each date pattern match (dd/mm/yyyy or dd MMM yy).
-    Returns list of string rows.
+    Split a large text blob containing multiple transactions into separate rows,
+    splitting by positions where a new transaction date starts.
+    Returns a list of row strings.
     """
-    # Use positive lookahead to split but keep delimiters
     pattern = r'(?=\d{2}/\d{2}/\d{4})|(?=\d{1,2} [A-Za-z]{3} \d{2})'
     parts = re.split(pattern, text)
-    # Remove empty strings and trim spaces
-    return [p.strip() for p in parts if p.strip()]
+    return [part.strip() for part in parts if part.strip()]
 
 
 def extract_transactions(pdf_path):
     """
-    Extract transactions handling both:
-    - Normal pdfplumber tables where each row is a transaction row
-    - Cases where pdfplumber returns one big row (joined text), splitting it with regex
-    Returns list of dicts with keys: Date, Vendor, Description,
-    Debit Amount, Credit Amount, Balance
+    Extract transactions robustly from given PDF path.
+    Supports both normal multi-row tables and single large text blob tables.
+    Returns list of dicts with keys:
+    Date, Vendor, Description, Debit Amount, Credit Amount, Balance
     """
     transactions = []
 
@@ -108,33 +108,31 @@ def extract_transactions(pdf_path):
         for page in pdf.pages:
             tables = page.extract_tables()
             for table in tables:
-                # Check if the table looks like a single large row joined as one string
+                # Detect single large text blob in one cell (common in problematic PDFs)
                 if len(table) == 1 and len(table[0]) == 1 and len(table[0][0]) > 100:
-                    # Big joined text, split it into transaction rows
                     text_blob = table[0][0]
                     rows_text = split_single_row_to_rows(text_blob)
 
                     for row_text in rows_text:
-                        # Split the row text roughly by multiple spaces or tab
+                        # Split columns by 2+ spaces or tabs
                         cols = re.split(r'\s{2,}|\t', row_text)
+
                         if len(cols) < 3:
-                            # Skip if definitely not enough columns
                             continue
 
-                        # Identify the date column (first col)
                         date_str = cols[0].strip()
                         if not (re.match(r"\d{2}/\d{2}/\d{4}", date_str) or re.match(r"\d{1,2} [A-Za-z]{3} \d{2}", date_str)):
                             continue
 
-                        txn = {}
-                        txn["Date"] = parse_date(date_str)
-                        txn["Vendor"] = cols[1].strip() if len(cols) > 1 else ""
-                        txn["Description"] = cols[2].strip() if len(cols) > 2 else ""
+                        txn = {
+                            "Date": parse_date(date_str),
+                            "Vendor": cols[1].strip() if len(cols) > 1 else "",
+                            "Description": cols[2].strip() if len(cols) > 2 else ""
+                        }
 
-                        # Amount columns detection heuristic:
-                        debit_amt = credit_amt = ""
+                        debit_amt = ""
+                        credit_amt = ""
 
-                        # Try to find debit/credit amount in rest columns
                         for amt_col in cols[3:]:
                             d, c = parse_amount_with_dc(amt_col)
                             if d != "":
@@ -144,12 +142,11 @@ def extract_transactions(pdf_path):
 
                         txn["Debit Amount"] = debit_amt
                         txn["Credit Amount"] = credit_amt
-                        txn["Balance"] = ""  # Balance data might be missing here
+                        txn["Balance"] = ""  # if balance info is available, parse here
 
                         transactions.append(txn)
-
                 else:
-                    # This is a normal table with rows
+                    # Normal well-structured tables
                     for row in table:
                         if not row or len(row) < 2:
                             continue
@@ -159,10 +156,11 @@ def extract_transactions(pdf_path):
                                 or re.match(r"\d{1,2} [A-Za-z]{3} \d{2}", first_col)):
                             continue
 
-                        txn = {}
-                        txn["Date"] = parse_date(first_col)
-                        txn["Vendor"] = str(row[1]).strip() if len(row) > 1 else ""
-                        txn["Description"] = str(row[2]).strip() if len(row) > 2 else ""
+                        txn = {
+                            "Date": parse_date(first_col),
+                            "Vendor": str(row[1]).strip() if len(row) > 1 else "",
+                            "Description": str(row[2]).strip() if len(row) > 2 else ""
+                        }
 
                         debit_amt = ""
                         credit_amt = ""
@@ -176,7 +174,7 @@ def extract_transactions(pdf_path):
                             if c != "":
                                 credit_amt = c
 
-                        # Fallback if still empty
+                        # Fallback to 4th column if amounts not set
                         if debit_amt == "" and credit_amt == "" and len(row) >= 4:
                             d, c = parse_amount_with_dc(row[3])
                             debit_amt = d
