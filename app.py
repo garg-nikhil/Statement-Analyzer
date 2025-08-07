@@ -17,44 +17,48 @@ def process_pdf():
     try:
         if 'file' not in request.files:
             return jsonify({"error": "No file uploaded"}), 400
+        
         file = request.files['file']
 
         with tempfile.NamedTemporaryFile(delete=False, suffix='.pdf') as tmp:
             file.save(tmp.name)
+            # Extract statement month like "August 2025"
             month = extract_statement_month(tmp.name) or "Unknown"
-            txns = extract_transactions(tmp.name)
+            transactions = extract_transactions(tmp.name)
 
-        if not txns:
+        if not transactions:
             return jsonify({"error": "No transactions found"}), 200
 
-        # Convert to DataFrame and fill missing fields
+        # Normalize and ensure consistent columns
         cols = ["Date", "Vendor", "Description", "Debit Amount", "Credit Amount", "Balance"]
-        df = pd.DataFrame(txns)
+        df = pd.DataFrame(transactions)
         for col in cols:
             if col not in df.columns:
                 df[col] = ""
         df = df[cols]
 
-        # Prepare rows as lists for Google Sheets
+        # Convert to list of lists for Google Sheets API
         rows = df.values.tolist()
+
         payload = {
             "sheetName": month,
             "data": rows
         }
 
-        # Send (append) to Google Sheets via Apps Script webhook
+        # POST data to Google Sheets Apps Script webhook
         resp = requests.post(GOOGLE_SHEETS_WEBHOOK, json=payload)
 
-        # Show feedback to frontend
         return jsonify({
             "month": month,
             "rows_sent": len(rows),
             "google_sheets_response": resp.text
         }), 200
+
     except Exception as e:
         import traceback
-        print(traceback.format_exc())
+        traceback.print_exc()
         return jsonify({"error": str(e)}), 500
+
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))

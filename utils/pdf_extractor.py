@@ -2,6 +2,7 @@ import pdfplumber
 import re
 from datetime import datetime
 
+
 def extract_statement_month(pdf_path):
     """
     Try to extract the statement month from the first two pages of the PDF.
@@ -12,12 +13,12 @@ def extract_statement_month(pdf_path):
             text = page.extract_text()
             if not text:
                 continue
-            # Format: 01/08/2025 - 31/08/2025
+            # Check for date range pattern: 01/08/2025 - 31/08/2025
             match = re.search(r'(\d{2}/\d{2}/\d{4})\s*-\s*(\d{2}/\d{2}/\d{4})', text)
             if match:
                 dt = datetime.strptime(match.group(1), "%d/%m/%Y")
                 return dt.strftime("%B %Y")  # e.g. "August 2025"
-            # Format: August 2025
+            # Check for month-year pattern: August 2025
             match2 = re.search(
                 r'(January|February|March|April|May|June|July|August|September|October|November|December)\s+(\d{4})',
                 text,
@@ -68,8 +69,7 @@ def extract_transactions(pdf_path):
             tables = page.extract_tables()
             for table in tables:
                 for row in table:
-                    # Heuristic: skip header rows by checking if a date is present
-                    # Change this regex/data logic as needed for your formats!
+                    # Heuristic: skip header rows by checking if first column looks like a date (dd/mm/yyyy)
                     if not row or not re.match(r"\d{2}/\d{2}/\d{4}", str(row[0])):
                         continue
                     
@@ -80,18 +80,21 @@ def extract_transactions(pdf_path):
 
                     debit_amt, credit_amt = "", ""
 
-                    # Logic for amount columns depending on row length
                     if len(row) >= 5:
-                        # If both debit and credit amounts are separate columns,
-                        # use parse_amount_string to correctly fill them
-                        debit_amt, credit_amt = parse_amount_string(row[3])
-                        # If credit column is also present and non-empty, override credit_amt
+                        # Parse Debit Column (row[3]) for possible amount with Cr suffix
+                        debit_amt, credit_amt_temp = parse_amount_string(row[3])
+                        # If the credit column exists (row[4]) and is non-empty, parse it and override credit_amt
                         if row[4] is not None and str(row[4]).strip() != "":
-                            _, credit_val = parse_amount_string(row[4])
-                            if credit_val != "":
-                                credit_amt = credit_val
+                            _, credit_amt_parsed = parse_amount_string(row[4])
+                            if credit_amt_parsed != "":
+                                credit_amt = credit_amt_parsed
+                            elif credit_amt_temp != "":
+                                credit_amt = credit_amt_temp
+                        else:
+                            # Use credit amount from debit column parsing if credit column empty
+                            credit_amt = credit_amt_temp
                     elif len(row) >= 4:
-                        # Single amount column, might have "Cr" or "C"
+                        # Single amount column at row[3], parse credit/debit by suffix
                         debit_amt, credit_amt = parse_amount_string(row[3])
                     else:
                         debit_amt, credit_amt = "", ""
